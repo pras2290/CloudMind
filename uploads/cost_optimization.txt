@@ -1,0 +1,35 @@
+AWS Cost Optimization Guide
+============================
+
+1. Compute Optimization
+   - Right-size EC2 instances using AWS Compute Optimizer
+   - Use Auto Scaling to match capacity with demand
+   - Purchase Reserved Instances for steady state workloads saves up to 72%
+   - Use Spot Instances for batch processing saves up to 90%
+   - Stop development instances outside working hours
+
+2. Storage Optimization
+   - Use S3 Intelligent Tiering for unpredictable access patterns
+   - Delete unattached EBS volumes regularly
+   - Remove unused EBS snapshots older than 90 days
+   - Use S3 Lifecycle policies to move data to cheaper storage tiers
+   - Compress data before storing in S3
+
+3. Network Optimization
+   - Use VPC Endpoints to avoid NAT Gateway charges
+   - Place resources in same AZ to avoid cross-AZ data transfer costs
+   - Use CloudFront for content delivery instead of direct S3 access
+   - Monitor and optimize data transfer costs via Cost Explorer
+
+4. Database Optimization
+   - Use Aurora Serverless for variable database workloads
+   - Enable RDS stop/start for non-production databases
+   - Use DynamoDB on-demand for unpredictable workloads
+   - Archive old data to S3 using DynamoDB TTL
+
+5. Monitoring and Governance
+   - Set up AWS Budgets with alerts at 80% and 100% threshold
+   - Use Cost Explorer to identify top spending services
+   - Tag all resources for cost allocation
+   - Review Trusted Advisor recommendations monthly
+   - Enable AWS Cost Anomaly Detection for unexpected spend alerts

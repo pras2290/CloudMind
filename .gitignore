@@ -1,0 +1,10 @@
+.env
+venv/
+__pycache__/
+*.pyc
+*.pem
+*.key
+chroma_db/
+.DS_Store
+*.sqlite
+*.db

@@ -1,0 +1,42 @@
+Standard Operating Procedures AWS Infrastructure
+====================================================
+
+SOP-001: New AWS Account Setup
+- Enable MFA on root account immediately
+- Create IAM admin user never use root for daily operations
+- Set up AWS Budgets with monthly alert
+- Enable CloudTrail in all regions
+- Enable AWS Config for resource compliance tracking
+- Set up billing alarm in CloudWatch
+
+SOP-002: EC2 Instance Provisioning
+- Always use latest AMI from AWS marketplace
+- Attach IAM role instead of storing credentials on instance
+- Enable detailed monitoring for production instances
+- Use encrypted EBS volumes for all instances
+- Tag instances with Environment Owner Project CostCenter
+- Document instance purpose in Name tag
+
+SOP-003: S3 Bucket Creation
+- Block all public access by default
+- Enable versioning for critical data buckets
+- Enable server-side encryption SSE-S3 or SSE-KMS
+- Set up lifecycle policies from day one
+- Never store credentials or secrets in S3 buckets
+- Enable access logging for audit purposes
+
+SOP-004: Lambda Function Deployment
+- Always use environment variables for configuration
+- Never hardcode credentials in Lambda code
+- Set appropriate timeout and memory based on testing
+- Enable X-Ray tracing for production functions
+- Use Lambda layers for shared dependencies
+- Set up DLQ for failed invocation handling
+
+SOP-005: Incident Response
+- Identify and classify incident severity P1 P2 P3
+- P1 Response within 15 minutes all hands on deck
+- P2 Response within 1 hour assigned engineer
+- P3 Response within 4 hours next business day
+- Document all incidents in KEDB after resolution
+- Conduct post-mortem for all P1 and P2 incidents

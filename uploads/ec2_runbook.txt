@@ -1,0 +1,38 @@
+EC2 Instance Management Runbook
+================================
+
+1. Starting a Stopped EC2 Instance
+   - Login to AWS Console
+   - Navigate to EC2 > Instances
+   - Select the instance
+   - Click Actions > Start Instance
+   - Wait for instance state to change to "running"
+   - Verify by checking public IP is assigned
+
+2. Stopping an EC2 Instance
+   - Navigate to EC2 > Instances
+   - Select running instance
+   - Click Actions > Stop Instance
+   - Confirm stop action
+   - Wait for state to change to "stopped"
+
+3. Troubleshooting EC2 Connection Issues
+   - Check instance state is running
+   - Verify security group allows port 22 (SSH) or 3389 (RDP)
+   - Check NACL rules are not blocking traffic
+   - Verify key pair is correct
+   - Check instance system logs for boot errors
+
+4. EC2 Performance Issues
+   - Check CloudWatch CPU utilization metric
+   - Review memory usage via CloudWatch agent
+   - Check disk space using df -h command
+   - Review running processes using top command
+   - Consider upgrading instance type if consistently above 80% CPU
+
+5. EC2 Cost Optimization
+   - Use Reserved Instances for predictable workloads
+   - Enable Auto Scaling for variable workloads
+   - Use Spot Instances for fault tolerant workloads
+   - Right-size instances based on CloudWatch metrics
+   - Stop non-production instances outside business hours

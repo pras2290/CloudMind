@@ -1,0 +1,42 @@
+Known Error Database (KEDB)
+============================
+
+Error ID: KEDB-001
+Title: Lambda function timeout on large S3 file processing
+Symptom: Lambda function exits with Task timed out error
+Root Cause: Default Lambda timeout of 3 seconds insufficient for large files
+Resolution: Increase Lambda timeout to 5 minutes in function configuration
+Prevention: Always set timeout based on expected execution time plus 20% buffer
+Status: Resolved
+
+Error ID: KEDB-002
+Title: S3 Access Denied on cross-account bucket access
+Symptom: AccessDenied exception when accessing S3 bucket from another account
+Root Cause: Bucket policy does not allow cross-account access
+Resolution: Add cross-account principal to bucket policy
+Prevention: Review bucket policies during architecture design
+Status: Resolved
+
+Error ID: KEDB-003
+Title: CloudWatch alarms not triggering SNS notifications
+Symptom: Alarm state changes but no email received
+Root Cause: SNS topic subscription not confirmed
+Resolution: Confirm subscription via email link sent to subscriber
+Prevention: Verify SNS subscription status after setup
+Status: Resolved
+
+Error ID: KEDB-004
+Title: IAM role missing permissions for Lambda to access DynamoDB
+Symptom: Lambda function throws AccessDeniedException for DynamoDB calls
+Root Cause: Lambda execution role missing dynamodb:PutItem permission
+Resolution: Add AmazonDynamoDBFullAccess policy to Lambda execution role
+Prevention: Use least privilege IAM policies with explicit required permissions
+Status: Resolved
+
+Error ID: KEDB-005
+Title: EC2 instance unreachable after security group change
+Symptom: SSH connection times out after modifying security group
+Root Cause: Inbound rule for port 22 accidentally removed
+Resolution: Re-add inbound rule for port 22 from trusted CIDR
+Prevention: Always verify SSH rule exists before saving security group changes
+Status: Resolved
