@@ -11,3 +11,5 @@ chroma_db/
 
 *.db-wal
 *.db-shm
+node_modules/
+web/dist/

@@ -1,6 +1,5 @@
 import logging
 import os
-import re
 import uuid
 import streamlit as st
 from config import DOCS_DIR
@@ -10,18 +9,13 @@ from rag.memory import (
     create_session, delete_session
 )
 from rag.ingestion import ingest_all, load_vectorstore, vectorstore_exists
+from rag.uploads import safe_upload_name
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s"
 )
 logger = logging.getLogger(__name__)
-
-
-def safe_upload_name(name):
-    """Strip directories and any characters outside [A-Za-z0-9_.-]."""
-    base = os.path.basename(name.replace("\\", "/"))
-    return re.sub(r"[^A-Za-z0-9_.-]", "_", base).lstrip(".")
 
 
 # ── Page config ───────────────────────────────────────────────
