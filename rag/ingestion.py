@@ -1,30 +1,37 @@
+import hashlib
+import json
+import logging
 import os
 import pdfplumber
 import pandas as pd
-import sys
 from docx import Document as DocxDocument
 from langchain_core.documents import Document
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+from fetchers import common
+from fetchers.common import (  # noqa: F401 (re-exported for app.py)
+    CHROMA_DIR, DOCS_DIR, CHUNK_SIZE, CHUNK_OVERLAP,
+    get_embeddings, load_vectorstore, vectorstore_exists
+)
 from fetchers.cost_fetcher import fetch_all_cost_data
 from fetchers.ec2_fetcher import fetch_all_ec2_data
 from fetchers.s3_fetcher import fetch_all_s3_data
 from fetchers.lambda_fetcher import fetch_all_lambda_data
 from fetchers.cloudwatch_fetcher import fetch_all_cloudwatch_data
 from fetchers.iam_fetcher import fetch_all_iam_data
-from config import (
-    CHROMA_DB_PATH, COLLECTION_NAME, EMBEDDING_MODEL,
-    CHUNK_SIZE, CHUNK_OVERLAP
-)
 
-sys.path.append("/Users/prasannavenkatraman/cloudmind")
-# ── Embedding model ───────────────────────────────────────────
-def get_embeddings():
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        encode_kwargs={"normalize_embeddings": True}
-    )
+logger = logging.getLogger(__name__)
+
+AWS_FETCHERS = [
+    ("aws_cost_explorer", fetch_all_cost_data),
+    ("aws_ec2", fetch_all_ec2_data),
+    ("aws_s3", fetch_all_s3_data),
+    ("aws_lambda", fetch_all_lambda_data),
+    ("aws_cloudwatch", fetch_all_cloudwatch_data),
+    ("aws_iam", fetch_all_iam_data),
+]
+
+# Chroma rejects very large single add() calls.
+ADD_BATCH_SIZE = 1000
 
 
 # ── Text splitter ─────────────────────────────────────────────
@@ -89,10 +96,54 @@ def load_uploaded_files(upload_path="./uploads"):
                 docs.extend(load_word(file_path))
             elif ext == ".csv":
                 docs.extend(load_csv(file_path))
-            print(f"Loaded: {filename}")
+            logger.info("Loaded: %s", filename)
         except Exception as e:
-            print(f"Error loading {filename}: {e}")
+            logger.warning("Error loading %s: %s", filename, e)
     return docs
+
+
+# ── Dedup helpers ─────────────────────────────────────────────
+def doc_id(doc):
+    """Deterministic ID from chunk content + metadata."""
+    key = doc.page_content + "\x00" + json.dumps(
+        doc.metadata, sort_keys=True, default=str
+    )
+    return hashlib.md5(key.encode("utf-8")).hexdigest()
+
+
+def _is_aws_source(source):
+    return isinstance(source, str) and source.startswith("aws_")
+
+
+def _sync_vectorstore(vectorstore, chunks, failed_sources):
+    """Add new chunks; drop stale ones from sources that fetched cleanly."""
+    unique = {}
+    for chunk in chunks:
+        unique.setdefault(doc_id(chunk), chunk)
+
+    existing = vectorstore.get(include=["metadatas"])
+    existing_ids = set(existing["ids"])
+
+    stale_ids = []
+    for id_, meta in zip(existing["ids"], existing["metadatas"]):
+        if id_ in unique:
+            continue
+        source = (meta or {}).get("source")
+        if _is_aws_source(source) and source in failed_sources:
+            continue  # keep last good data for services that failed this run
+        stale_ids.append(id_)
+
+    new_ids = [i for i in unique if i not in existing_ids]
+    logger.info(
+        "Chunks: %d unique, %d already indexed, %d new, %d stale removed",
+        len(unique), len(unique) - len(new_ids), len(new_ids), len(stale_ids)
+    )
+
+    for start in range(0, len(stale_ids), ADD_BATCH_SIZE):
+        vectorstore.delete(ids=stale_ids[start:start + ADD_BATCH_SIZE])
+    for start in range(0, len(new_ids), ADD_BATCH_SIZE):
+        batch = new_ids[start:start + ADD_BATCH_SIZE]
+        vectorstore.add_documents([unique[i] for i in batch], ids=batch)
 
 
 # ── Master ingestion ──────────────────────────────────────────
@@ -100,61 +151,46 @@ def ingest_all():
     all_docs = []
     splitter = get_splitter()
 
-    print("\n── Fetching AWS data ────────────────────")
-    all_docs.extend(fetch_all_cost_data())
-    all_docs.extend(fetch_all_ec2_data())
-    all_docs.extend(fetch_all_s3_data())
-    all_docs.extend(fetch_all_lambda_data())
-    all_docs.extend(fetch_all_cloudwatch_data())
-    all_docs.extend(fetch_all_iam_data())
+    logger.info("── Fetching AWS data ────────────────────")
+    common.reset_fetch_failures()
+    failed_sources = set()
+    for source, fetch in AWS_FETCHERS:
+        try:
+            all_docs.extend(fetch())
+        except Exception:
+            logger.exception("Fetching %s failed; continuing", source)
+            failed_sources.add(source)
+    failed_sources |= common.get_fetch_failures()
+    if failed_sources:
+        logger.warning("Services with fetch errors: %s", sorted(failed_sources))
 
-    print("\n── Loading uploaded files ───────────────")
+    logger.info("── Loading uploaded files ───────────────")
     all_docs.extend(load_uploaded_files())
 
-    print(f"\nTotal raw documents: {len(all_docs)}")
+    logger.info("Total raw documents: %d", len(all_docs))
 
     # Chunk
     chunks = splitter.split_documents(all_docs)
-    print(f"Total chunks after splitting: {len(chunks)}")
+    logger.info("Total chunks after splitting: %d", len(chunks))
 
-    # Embed + Store
-    print("\nEmbedding and storing in ChromaDB...")
-    embeddings = get_embeddings()
-    vectorstore = Chroma.from_documents(
-        documents=chunks,
-        embedding=embeddings,
-        persist_directory=CHROMA_DB_PATH,
-        collection_name=COLLECTION_NAME
-    )
-    print("Ingestion complete.")
+    # Embed + Store (incremental)
+    logger.info("Embedding and storing in ChromaDB...")
+    vectorstore = load_vectorstore()
+    _sync_vectorstore(vectorstore, chunks, failed_sources)
+    logger.info("Ingestion complete.")
     return vectorstore
-
-
-def load_vectorstore():
-    """Load existing ChromaDB vectorstore."""
-    embeddings = get_embeddings()
-    return Chroma(
-        persist_directory=CHROMA_DB_PATH,
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME
-    )
-
-
-def vectorstore_exists():
-    """Check if ChromaDB already has data."""
-    return os.path.exists(CHROMA_DB_PATH) and \
-           len(os.listdir(CHROMA_DB_PATH)) > 0
 
 
 # ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # print("Starting full ingestion...")
-    # vectorstore = ingest_all()
-    # print(f"\nVectorstore ready.")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger.info("Starting full ingestion...")
+    vectorstore = ingest_all()
+    logger.info("Vectorstore ready — %d chunks indexed.", len(vectorstore.get(include=[])["ids"]))
 
     # Quick test query
     results = vectorstore.similarity_search("AWS cost", k=3)
-    print(f"\nTest query results: {len(results)}")
+    logger.info("Test query results: %d", len(results))
     for r in results:
-        print(f"\n{r.page_content[:200]}")
-        print(f"Source: {r.metadata['source']}")
+        logger.info("\n%s", r.page_content[:200])
+        logger.info("Source: %s", r.metadata['source'])

@@ -1,55 +1,51 @@
-import boto3
-import os
-from datetime import datetime, timezone
+import logging
 from langchain_core.documents import Document
-from dotenv import load_dotenv
+from fetchers.common import (
+    AWS_ERRORS, get_boto3_client, paginate, record_fetch_failure
+)
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-def get_boto3_client(service):
-    return boto3.client(
-        service,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("AWS_REGION")
-    )
+
+def _lookup(client, operation, result_key, field, **kwargs):
+    """Paginated sub-lookup returning `field` of each item, or [] on error."""
+    try:
+        return [item[field] for item in paginate(client, operation, result_key, **kwargs)]
+    except AWS_ERRORS as e:
+        logger.warning("IAM %s failed for %s: %s", operation, kwargs, e)
+        return []
+
 
 def fetch_iam_users():
     """Fetch all IAM users and their details."""
-    client = get_boto3_client("iam")
-    paginator = client.get_paginator("list_users")
-
     docs = []
-    for page in paginator.paginate():
-        for user in page["Users"]:
-            # Get user groups
-            try:
-                groups_response = client.list_groups_for_user(
-                    UserName=user["UserName"]
-                )
-                groups = [g["GroupName"] for g in groups_response["Groups"]]
-            except:
-                groups = []
+    try:
+        client = get_boto3_client("iam")
+        users = paginate(client, "list_users", "Users")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_iam", "users", e)
+        return docs
 
-            # Get attached policies
-            try:
-                policies_response = client.list_attached_user_policies(
-                    UserName=user["UserName"]
-                )
-                policies = [p["PolicyName"] for p in policies_response["AttachedPolicies"]]
-            except:
-                policies = []
+    for user in users:
+        # Get user groups
+        groups = _lookup(client, "list_groups_for_user", "Groups",
+                         "GroupName", UserName=user["UserName"])
 
-            # Check MFA
-            try:
-                mfa_response = client.list_mfa_devices(
-                    UserName=user["UserName"]
-                )
-                mfa_enabled = len(mfa_response["MFADevices"]) > 0
-            except:
-                mfa_enabled = False
+        # Get attached policies
+        policies = _lookup(client, "list_attached_user_policies",
+                           "AttachedPolicies", "PolicyName",
+                           UserName=user["UserName"])
 
-            text = f"""IAM User:
+        # Check MFA
+        try:
+            mfa_devices = paginate(client, "list_mfa_devices", "MFADevices",
+                                   UserName=user["UserName"])
+            mfa_enabled = len(mfa_devices) > 0
+        except AWS_ERRORS as e:
+            logger.warning("IAM MFA lookup failed for %s: %s", user["UserName"], e)
+            mfa_enabled = False
+
+        text = f"""IAM User:
 Username: {user['UserName']}
 User ID: {user['UserId']}
 Created: {user['CreateDate'].strftime('%Y-%m-%d')}
@@ -58,40 +54,39 @@ MFA Enabled: {mfa_enabled}
 Groups: {', '.join(groups) if groups else 'None'}
 Attached Policies: {', '.join(policies) if policies else 'None'}"""
 
-            docs.append(Document(
-                page_content=text,
-                metadata={
-                    "source": "aws_iam",
-                    "username": user["UserName"],
-                    "mfa_enabled": mfa_enabled,
-                    "type": "iam_user"
-                }
-            ))
+        docs.append(Document(
+            page_content=text,
+            metadata={
+                "source": "aws_iam",
+                "username": user["UserName"],
+                "mfa_enabled": mfa_enabled,
+                "type": "iam_user"
+            }
+        ))
     return docs
 
 
 def fetch_iam_roles():
     """Fetch all IAM roles."""
-    client = get_boto3_client("iam")
-    paginator = client.get_paginator("list_roles")
-
     docs = []
-    for page in paginator.paginate():
-        for role in page["Roles"]:
-            # Skip AWS service roles
-            if "aws-service-role" in role["RoleName"]:
-                continue
+    try:
+        client = get_boto3_client("iam")
+        roles = paginate(client, "list_roles", "Roles")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_iam", "roles", e)
+        return docs
 
-            # Get attached policies
-            try:
-                policies_response = client.list_attached_role_policies(
-                    RoleName=role["RoleName"]
-                )
-                policies = [p["PolicyName"] for p in policies_response["AttachedPolicies"]]
-            except:
-                policies = []
+    for role in roles:
+        # Skip AWS service roles
+        if "aws-service-role" in role["RoleName"]:
+            continue
 
-            text = f"""IAM Role:
+        # Get attached policies
+        policies = _lookup(client, "list_attached_role_policies",
+                           "AttachedPolicies", "PolicyName",
+                           RoleName=role["RoleName"])
+
+        text = f"""IAM Role:
 Name: {role['RoleName']}
 Role ID: {role['RoleId']}
 Created: {role['CreateDate'].strftime('%Y-%m-%d')}
@@ -99,66 +94,59 @@ Description: {role.get('Description', 'No description')}
 Attached Policies: {', '.join(policies) if policies else 'None'}
 ARN: {role['Arn']}"""
 
-            docs.append(Document(
-                page_content=text,
-                metadata={
-                    "source": "aws_iam",
-                    "role_name": role["RoleName"],
-                    "type": "iam_role"
-                }
-            ))
+        docs.append(Document(
+            page_content=text,
+            metadata={
+                "source": "aws_iam",
+                "role_name": role["RoleName"],
+                "type": "iam_role"
+            }
+        ))
     return docs
 
 
 def fetch_iam_groups():
     """Fetch all IAM groups."""
-    client = get_boto3_client("iam")
-    paginator = client.get_paginator("list_groups")
-
     docs = []
-    for page in paginator.paginate():
-        for group in page["Groups"]:
-            # Get group policies
-            try:
-                policies_response = client.list_attached_group_policies(
-                    GroupName=group["GroupName"]
-                )
-                policies = [p["PolicyName"] for p in policies_response["AttachedPolicies"]]
-            except:
-                policies = []
+    try:
+        client = get_boto3_client("iam")
+        groups = paginate(client, "list_groups", "Groups")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_iam", "groups", e)
+        return docs
 
-            # Get group members
-            try:
-                members_response = client.get_group(
-                    GroupName=group["GroupName"]
-                )
-                members = [u["UserName"] for u in members_response["Users"]]
-            except:
-                members = []
+    for group in groups:
+        # Get group policies
+        policies = _lookup(client, "list_attached_group_policies",
+                           "AttachedPolicies", "PolicyName",
+                           GroupName=group["GroupName"])
 
-            text = f"""IAM Group:
+        # Get group members
+        members = _lookup(client, "get_group", "Users", "UserName",
+                          GroupName=group["GroupName"])
+
+        text = f"""IAM Group:
 Name: {group['GroupName']}
 Group ID: {group['GroupId']}
 Created: {group['CreateDate'].strftime('%Y-%m-%d')}
 Members: {', '.join(members) if members else 'None'}
 Attached Policies: {', '.join(policies) if policies else 'None'}"""
 
-            docs.append(Document(
-                page_content=text,
-                metadata={
-                    "source": "aws_iam",
-                    "group_name": group["GroupName"],
-                    "type": "iam_group"
-                }
-            ))
+        docs.append(Document(
+            page_content=text,
+            metadata={
+                "source": "aws_iam",
+                "group_name": group["GroupName"],
+                "type": "iam_group"
+            }
+        ))
     return docs
 
 
 def fetch_iam_summary():
     """Fetch overall IAM account summary."""
-    client = get_boto3_client("iam")
-
     try:
+        client = get_boto3_client("iam")
         summary = client.get_account_summary()
         data = summary["SummaryMap"]
 
@@ -175,31 +163,32 @@ Access Keys: {data.get('AccessKeys', 0)}"""
             page_content=text,
             metadata={"source": "aws_iam", "type": "iam_summary"}
         )]
-    except Exception as e:
-        print(f"IAM summary error: {e}")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_iam", "account summary", e)
         return []
 
 
 def fetch_all_iam_data():
     """Fetch all IAM related data."""
     docs = []
-    print("Fetching IAM summary...")
+    logger.info("Fetching IAM summary...")
     docs.extend(fetch_iam_summary())
-    print("Fetching IAM users...")
+    logger.info("Fetching IAM users...")
     docs.extend(fetch_iam_users())
-    print("Fetching IAM roles...")
+    logger.info("Fetching IAM roles...")
     docs.extend(fetch_iam_roles())
-    print("Fetching IAM groups...")
+    logger.info("Fetching IAM groups...")
     docs.extend(fetch_iam_groups())
-    print(f"IAM fetcher done — {len(docs)} documents")
+    logger.info("IAM fetcher done — %d documents", len(docs))
     return docs
 
 
 # ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     docs = fetch_all_iam_data()
-    print(f"\nTotal docs: {len(docs)}")
-    print("\nSample:")
+    logger.info("\nTotal docs: %d", len(docs))
+    logger.info("\nSample:")
     for doc in docs[:3]:
-        print(f"\n{doc.page_content}")
-        print(f"Metadata: {doc.metadata}")
+        logger.info("\n%s", doc.page_content)
+        logger.info("Metadata: %s", doc.metadata)

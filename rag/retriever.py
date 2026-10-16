@@ -1,50 +1,30 @@
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import logging
+import math
 
-# from langchain_community.vectorstores import Chroma
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_classic.retrievers import EnsembleRetriever
 from langchain_community.retrievers import BM25Retriever
 from langchain_core.documents import Document
-from sentence_transformers import CrossEncoder
-from config import (
-    CHROMA_DB_PATH, COLLECTION_NAME, EMBEDDING_MODEL, TOP_K
+from fetchers.common import (  # noqa: F401 (re-exported)
+    CHROMA_DIR, COLLECTION_NAME, TOP_K,
+    get_embeddings, get_reranker, load_vectorstore
 )
 
-
-# ── Load embeddings ───────────────────────────────────────────
-def get_embeddings():
-    return HuggingFaceEmbeddings(
-        model_name=EMBEDDING_MODEL,
-        encode_kwargs={"normalize_embeddings": True}
-    )
+logger = logging.getLogger(__name__)
 
 
-# ── Load vectorstore ──────────────────────────────────────────
-def load_vectorstore():
-    embeddings = get_embeddings()
-    return Chroma(
-        persist_directory=CHROMA_DB_PATH,
-        embedding_function=embeddings,
-        collection_name=COLLECTION_NAME
-    )
-
-
-# ── Reranker ──────────────────────────────────────────────────
-def get_reranker():
-    return CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
-
-
-def rerank(query, docs, reranker, top_n=3):
-    """Rerank retrieved docs using CrossEncoder."""
+def _rerank_with_scores(query, docs, reranker, top_n=3):
+    """Return [(score, doc), ...] sorted by CrossEncoder score, best first."""
     if not docs:
         return []
     pairs = [[query, doc.page_content] for doc in docs]
     scores = reranker.predict(pairs)
-    ranked = sorted(zip(scores, docs), reverse=True)
-    return [doc for _, doc in ranked[:top_n]]
+    ranked = sorted(zip(scores, docs), key=lambda pair: pair[0], reverse=True)
+    return ranked[:top_n]
+
+
+def rerank(query, docs, reranker, top_n=3):
+    """Rerank retrieved docs using CrossEncoder."""
+    return [doc for _, doc in _rerank_with_scores(query, docs, reranker, top_n)]
 
 
 # ── Hybrid retriever ──────────────────────────────────────────
@@ -72,7 +52,7 @@ def get_hybrid_retriever(vectorstore, all_docs):
 
 # ── Confidence check ──────────────────────────────────────────
 def get_confidence_score(query, docs, embeddings):
-    """Get similarity score of top result."""
+    """Cosine similarity of query vs top doc (legacy confidence metric)."""
     if not docs:
         return 0.0
     query_embedding = embeddings.embed_query(query)
@@ -85,35 +65,52 @@ def get_confidence_score(query, docs, embeddings):
     return dot / (norm_q * norm_d) if norm_q and norm_d else 0.0
 
 
+def reranker_confidence(score):
+    """Map a CrossEncoder logit to a 0-1 confidence."""
+    return 1.0 / (1.0 + math.exp(-float(score)))
+
+
 # ── Main retrieve function ────────────────────────────────────
-def retrieve(query, vectorstore, all_docs):
-    """Full retrieval pipeline — hybrid search + reranking."""
-    embeddings = get_embeddings()
+def retrieve_with_scores(query, vectorstore, all_docs):
+    """Hybrid search + reranking.
+
+    Returns (reranked_docs, confidence, routing_confidence): confidence is
+    the top reranker score (0-1); routing_confidence is the legacy cosine
+    score of the top pre-rerank doc, used for fallback decisions.
+    """
     reranker = get_reranker()
 
     # Hybrid retrieval
     retriever = get_hybrid_retriever(vectorstore, all_docs)
     docs = retriever.invoke(query)
 
-    # Confidence score
-    confidence = get_confidence_score(query, docs, embeddings)
+    routing_confidence = get_confidence_score(query, docs, get_embeddings())
 
-    # Rerank
-    reranked_docs = rerank(query, docs, reranker)
+    ranked = _rerank_with_scores(query, docs, reranker)
+    reranked_docs = [doc for _, doc in ranked]
+    confidence = reranker_confidence(ranked[0][0]) if ranked else 0.0
 
+    return reranked_docs, confidence, routing_confidence
+
+
+def retrieve(query, vectorstore, all_docs):
+    """Full retrieval pipeline — hybrid search + reranking."""
+    reranked_docs, confidence, _ = retrieve_with_scores(
+        query, vectorstore, all_docs
+    )
     return reranked_docs, confidence
 
 
 # ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
-    from rag.ingestion import load_vectorstore, ingest_all
     import chromadb
 
-    print("Loading vectorstore...")
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    logger.info("Loading vectorstore...")
     vectorstore = load_vectorstore()
 
     # Load all docs for BM25
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
     collection = chroma_client.get_collection(COLLECTION_NAME)
     results = collection.get()
     all_docs = [
@@ -121,16 +118,16 @@ if __name__ == "__main__":
         for doc, meta in zip(results["documents"], results["metadatas"])
     ]
 
-    print(f"Loaded {len(all_docs)} docs for BM25")
+    logger.info("Loaded %d docs for BM25", len(all_docs))
 
     query = "What is my AWS cost for last month?"
-    print(f"\nQuery: {query}")
+    logger.info("\nQuery: %s", query)
 
     docs, confidence = retrieve(query, vectorstore, all_docs)
 
-    print(f"Confidence: {confidence:.4f}")
-    print(f"Top {len(docs)} results:")
+    logger.info("Confidence: %.4f", confidence)
+    logger.info("Top %d results:", len(docs))
     for i, doc in enumerate(docs):
-        print(f"\n--- Result {i+1} ---")
-        print(doc.page_content[:300])
-        print(f"Source: {doc.metadata.get('source', 'N/A')}")
+        logger.info("\n--- Result %d ---", i + 1)
+        logger.info(doc.page_content[:300])
+        logger.info("Source: %s", doc.metadata.get('source', 'N/A'))

@@ -1,5 +1,9 @@
 import os
 from dotenv import load_dotenv
+from fetchers.common import (  # noqa: F401 (re-exported)
+    CHROMA_DIR, DOCS_DIR, COLLECTION_NAME, EMBEDDING_MODEL,
+    TOP_K, CHUNK_SIZE, CHUNK_OVERLAP
+)
 
 load_dotenv()
 
@@ -12,23 +16,14 @@ AWS_SECRET_ACCESS_KEY = os.getenv("AWS_SECRET_ACCESS_KEY", "")
 AWS_REGION = os.getenv("AWS_REGION", "us-east-1")
 
 # Paths
-CHROMA_DB_PATH = "./chroma_db"
+CHROMA_DB_PATH = CHROMA_DIR
 SQLITE_DB_PATH = "./memory.db"
-UPLOAD_PATH = "./uploads"
+UPLOAD_PATH = DOCS_DIR
 DATA_PATH = "./data"
-
-# Collection
-COLLECTION_NAME = "cloudmind_docs"
-
-# Embedding
-EMBEDDING_MODEL = "BAAI/bge-large-en-v1.5"
 
 # LLM
 LLM_MODEL = "gpt-4o-mini"
 TEMPERATURE = 0
 
 # Retrieval
-TOP_K = 8
 CONFIDENCE_THRESHOLD = 0.3
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200

@@ -1,15 +1,28 @@
-import sys
+import logging
 import os
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-
+import re
 import uuid
 import streamlit as st
+from config import DOCS_DIR
 from rag.pipeline import run_pipeline
 from rag.memory import (
     init_db, get_all_sessions, get_session_messages,
     create_session, delete_session
 )
 from rag.ingestion import ingest_all, load_vectorstore, vectorstore_exists
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+
+def safe_upload_name(name):
+    """Strip directories and any characters outside [A-Za-z0-9_.-]."""
+    base = os.path.basename(name.replace("\\", "/"))
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", base).lstrip(".")
+
 
 # ── Page config ───────────────────────────────────────────────
 st.set_page_config(
@@ -52,8 +65,12 @@ with st.sidebar:
         type=["pdf", "docx", "csv", "txt"]
     )
     if uploaded_files:
+        os.makedirs(DOCS_DIR, exist_ok=True)
         for file in uploaded_files:
-            file_path = os.path.join("./uploads", file.name)
+            safe_name = safe_upload_name(file.name)
+            if not safe_name:
+                continue
+            file_path = os.path.join(DOCS_DIR, safe_name)
             with open(file_path, "wb") as f:
                 f.write(file.getbuffer())
         st.success(f"{len(uploaded_files)} file(s) uploaded")
@@ -130,23 +147,30 @@ if prompt := st.chat_input("Ask about your AWS costs, instances, incidents..."):
             st.write(prompt)
 
         with st.chat_message("assistant"):
+            result = None
             with st.spinner("Thinking..."):
-                result = run_pipeline(prompt, st.session_state.session_id)
+                try:
+                    result = run_pipeline(prompt, st.session_state.session_id)
+                except Exception:
+                    logger.exception("run_pipeline failed")
+                    st.error("Something went wrong, please try again.")
 
-            answer = result["answer"]
-            confidence = result["confidence"]
-            source = result["source"]
+            if result is not None:
+                answer = result["answer"]
+                confidence = result["confidence"]
+                source = result["source"]
 
-            st.write(answer)
-            if source and source != "system":
-                st.caption(
-                    f"Source: {source} | "
-                    f"Confidence: {int(confidence * 100)}%"
-                )
+                st.write(answer)
+                if source and source != "system":
+                    st.caption(
+                        f"Source: {source} | "
+                        f"Confidence: {int(confidence * 100)}%"
+                    )
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": answer,
-            "source": source,
-            "confidence": confidence
-        })
+        if result is not None:
+            st.session_state.messages.append({
+                "role": "assistant",
+                "content": answer,
+                "source": source,
+                "confidence": confidence
+            })
