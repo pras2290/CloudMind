@@ -71,19 +71,33 @@ def reranker_confidence(score):
 
 
 # ── Main retrieve function ────────────────────────────────────
-def retrieve(query, vectorstore, all_docs):
-    """Full retrieval pipeline — hybrid search + reranking."""
+def retrieve_with_scores(query, vectorstore, all_docs):
+    """Hybrid search + reranking.
+
+    Returns (reranked_docs, confidence, routing_confidence): confidence is
+    the top reranker score (0-1); routing_confidence is the legacy cosine
+    score of the top pre-rerank doc, used for fallback decisions.
+    """
     reranker = get_reranker()
 
     # Hybrid retrieval
     retriever = get_hybrid_retriever(vectorstore, all_docs)
     docs = retriever.invoke(query)
 
-    # Rerank; confidence is the top reranked doc's score
+    routing_confidence = get_confidence_score(query, docs, get_embeddings())
+
     ranked = _rerank_with_scores(query, docs, reranker)
     reranked_docs = [doc for _, doc in ranked]
     confidence = reranker_confidence(ranked[0][0]) if ranked else 0.0
 
+    return reranked_docs, confidence, routing_confidence
+
+
+def retrieve(query, vectorstore, all_docs):
+    """Full retrieval pipeline — hybrid search + reranking."""
+    reranked_docs, confidence, _ = retrieve_with_scores(
+        query, vectorstore, all_docs
+    )
     return reranked_docs, confidence
 
 

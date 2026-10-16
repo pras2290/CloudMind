@@ -6,7 +6,9 @@ from langchain_openai import ChatOpenAI
 from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.output_parsers import StrOutputParser
-from rag.retriever import retrieve, load_vectorstore, get_embeddings
+from rag.retriever import (  # noqa: F401 (retrieve re-exported)
+    retrieve, retrieve_with_scores, load_vectorstore, get_embeddings
+)
 from rag.memory import (
     init_db, create_session, save_message,
     get_chat_history, update_session_title
@@ -235,6 +237,7 @@ def run_pipeline(query, session_id):
     logger.info("Source filter: %s", source_filter)
 
     # Retrieve
+    routing_confidence = None
     if is_live_query(query):
         logger.info("Live query — boto3 fallback")
         context, source = fallback_response(query, llm)
@@ -266,11 +269,15 @@ def run_pipeline(query, session_id):
         context = format_docs(docs) if docs else ""
     else:
         # Hybrid search
-        docs, confidence = retrieve(rewritten_query, vectorstore, all_docs)
+        docs, confidence, routing_confidence = retrieve_with_scores(
+            rewritten_query, vectorstore, all_docs
+        )
         context = format_docs(docs) if docs else ""
 
     # Fallback if no context
-    if not context or confidence < CONFIDENCE_THRESHOLD:
+    if routing_confidence is None:
+        routing_confidence = confidence
+    if not context or routing_confidence < CONFIDENCE_THRESHOLD:
         logger.info("Low confidence — fallback")
         context, source = fallback_response(query, llm)
         source = source
