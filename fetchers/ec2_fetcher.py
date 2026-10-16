@@ -1,25 +1,24 @@
-import boto3
+import logging
 import os
 from langchain_core.documents import Document
-from dotenv import load_dotenv
+from fetchers.common import (
+    AWS_ERRORS, get_boto3_client, paginate, record_fetch_failure
+)
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-def get_boto3_client(service):
-    return boto3.client(
-        service,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("AWS_REGION")
-    )
 
 def fetch_ec2_instances():
     """Fetch all EC2 instances and their details."""
-    client = get_boto3_client("ec2")
-    response = client.describe_instances()
-
     docs = []
-    for reservation in response["Reservations"]:
+    try:
+        client = get_boto3_client("ec2")
+        reservations = paginate(client, "describe_instances", "Reservations")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_ec2", "instances", e)
+        return docs
+
+    for reservation in reservations:
         for instance in reservation["Instances"]:
             name = ""
             for tag in instance.get("Tags", []):
@@ -51,11 +50,17 @@ def fetch_ec2_instances():
 
 def fetch_ec2_security_groups():
     """Fetch all security groups."""
-    client = get_boto3_client("ec2")
-    response = client.describe_security_groups()
-
     docs = []
-    for sg in response["SecurityGroups"]:
+    try:
+        client = get_boto3_client("ec2")
+        security_groups = paginate(
+            client, "describe_security_groups", "SecurityGroups"
+        )
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_ec2", "security groups", e)
+        return docs
+
+    for sg in security_groups:
         inbound = []
         for rule in sg.get("IpPermissions", []):
             protocol = rule.get("IpProtocol", "all")
@@ -83,11 +88,15 @@ def fetch_ec2_security_groups():
 
 def fetch_ec2_vpcs():
     """Fetch all VPCs."""
-    client = get_boto3_client("ec2")
-    response = client.describe_vpcs()
-
     docs = []
-    for vpc in response["Vpcs"]:
+    try:
+        client = get_boto3_client("ec2")
+        vpcs = paginate(client, "describe_vpcs", "Vpcs")
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_ec2", "VPCs", e)
+        return docs
+
+    for vpc in vpcs:
         name = ""
         for tag in vpc.get("Tags", []):
             if tag["Key"] == "Name":
@@ -114,30 +123,22 @@ Is Default: {vpc['IsDefault']}"""
 def fetch_all_ec2_data():
     """Fetch all EC2 related data."""
     docs = []
-    print("Fetching EC2 instances...")
+    logger.info("Fetching EC2 instances...")
     docs.extend(fetch_ec2_instances())
-    print("Fetching security groups...")
+    logger.info("Fetching security groups...")
     docs.extend(fetch_ec2_security_groups())
-    print("Fetching VPCs...")
+    logger.info("Fetching VPCs...")
     docs.extend(fetch_ec2_vpcs())
-    print(f"EC2 fetcher done — {len(docs)} documents")
+    logger.info("EC2 fetcher done — %d documents", len(docs))
     return docs
 
 
-def load_uploaded_files(upload_path="./uploads"):
-    docs = []
-    if not os.path.exists(upload_path):
-        return docs
-    for filename in os.listdir(upload_path):
-        if filename.startswith("."):  # skip hidden files
-            continue
-        file_path = os.path.join(upload_path, filename)
-
 # ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     docs = fetch_all_ec2_data()
-    print(f"\nTotal docs: {len(docs)}")
-    print("\nSample:")
+    logger.info("\nTotal docs: %d", len(docs))
+    logger.info("\nSample:")
     for doc in docs[:3]:
-        print(f"\n{doc.page_content}")
-        print(f"Metadata: {doc.metadata}")
+        logger.info("\n%s", doc.page_content)
+        logger.info("Metadata: %s", doc.metadata)

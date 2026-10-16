@@ -1,6 +1,5 @@
-import os
-import sys
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+import logging
+from datetime import datetime, timedelta
 
 import chromadb
 from langchain_openai import ChatOpenAI
@@ -12,10 +11,14 @@ from rag.memory import (
     init_db, create_session, save_message,
     get_chat_history, update_session_title
 )
-from config import (
-    OPENAI_API_KEY, LLM_MODEL, TEMPERATURE,
-    CHROMA_DB_PATH, COLLECTION_NAME, CONFIDENCE_THRESHOLD, TOP_K
+from fetchers.common import (
+    CHROMA_DIR, COLLECTION_NAME, TOP_K, get_boto3_client, paginate
 )
+from config import (
+    OPENAI_API_KEY, LLM_MODEL, TEMPERATURE, CONFIDENCE_THRESHOLD
+)
+
+logger = logging.getLogger(__name__)
 
 
 def get_llm():
@@ -27,7 +30,7 @@ def get_llm():
 
 
 def load_all_docs():
-    chroma_client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+    chroma_client = chromadb.PersistentClient(path=CHROMA_DIR)
     collection = chroma_client.get_collection(COLLECTION_NAME)
     results = collection.get()
     return [
@@ -128,54 +131,53 @@ def format_docs(docs):
     return "\n\n".join(formatted)
 
 
+def _live_ec2_context():
+    client = get_boto3_client("ec2")
+    instances = []
+    for r in paginate(client, "describe_instances", "Reservations"):
+        for i in r["Instances"]:
+            name = next((t["Value"] for t in i.get("Tags", [])
+                         if t["Key"] == "Name"), "unnamed")
+            instances.append(
+                f"Name: {name} | ID: {i['InstanceId']} | "
+                f"Type: {i['InstanceType']} | State: {i['State']['Name']}"
+            )
+    context = "Live EC2 Data:\n" + "\n".join(instances) if instances else "No EC2 instances found."
+    return context, "live_aws_ec2"
+
+
+def _live_cost_context():
+    client = get_boto3_client("ce", region_name="us-east-1")
+    end = datetime.today().replace(day=1).strftime("%Y-%m-%d")
+    start = (datetime.today().replace(day=1) -
+             timedelta(days=30)).strftime("%Y-%m-%d")
+    response = client.get_cost_and_usage(
+        TimePeriod={"Start": start, "End": end},
+        Granularity="MONTHLY",
+        Metrics=["UnblendedCost"]
+    )
+    cost = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
+    context = f"Live AWS Cost: Total last month = ${round(float(cost), 4)} USD"
+    return context, "live_aws_cost"
+
+
+def fetch_live_context(query):
+    """Fetch live EC2/Cost data straight from AWS for the query, or None."""
+    q = query.lower()
+    if any(w in q for w in ["instance", "ec2", "running", "stopped"]):
+        return _live_ec2_context()
+    elif any(w in q for w in ["cost", "bill", "spend"]):
+        return _live_cost_context()
+    return None
+
+
 def fallback_response(query, llm):
-    import boto3
-    from dotenv import load_dotenv
-    load_dotenv()
-
     try:
-        if any(w in query.lower() for w in ["instance", "ec2", "running", "stopped"]):
-            client = boto3.client(
-                "ec2",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name=os.getenv("AWS_REGION")
-            )
-            response = client.describe_instances()
-            instances = []
-            for r in response["Reservations"]:
-                for i in r["Instances"]:
-                    name = next((t["Value"] for t in i.get("Tags", [])
-                                 if t["Key"] == "Name"), "unnamed")
-                    instances.append(
-                        f"Name: {name} | ID: {i['InstanceId']} | "
-                        f"Type: {i['InstanceType']} | State: {i['State']['Name']}"
-                    )
-            context = "Live EC2 Data:\n" + "\n".join(instances) if instances else "No EC2 instances found."
-            return context, "live_aws_ec2"
-
-        elif any(w in query.lower() for w in ["cost", "bill", "spend"]):
-            from datetime import datetime, timedelta
-            client = boto3.client(
-                "ce",
-                aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-                aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-                region_name="us-east-1"
-            )
-            end = datetime.today().replace(day=1).strftime("%Y-%m-%d")
-            start = (datetime.today().replace(day=1) -
-                     timedelta(days=30)).strftime("%Y-%m-%d")
-            response = client.get_cost_and_usage(
-                TimePeriod={"Start": start, "End": end},
-                Granularity="MONTHLY",
-                Metrics=["UnblendedCost"]
-            )
-            cost = response["ResultsByTime"][0]["Total"]["UnblendedCost"]["Amount"]
-            context = f"Live AWS Cost: Total last month = ${round(float(cost), 4)} USD"
-            return context, "live_aws_cost"
-
-    except Exception as e:
-        print(f"Fallback error: {e}")
+        live = fetch_live_context(query)
+        if live is not None:
+            return live
+    except Exception:
+        logger.exception("Fallback error")
 
     return "No relevant information found.", "none"
 
@@ -226,21 +228,21 @@ def run_pipeline(query, session_id):
 
     # Rewrite query
     rewritten_query = rewrite_query(query, llm)
-    print(f"Rewritten: {rewritten_query}")
+    logger.info("Rewritten: %s", rewritten_query)
 
     # Detect source filter
     source_filter = detect_source_filter(query)
-    print(f"Source filter: {source_filter}")
+    logger.info("Source filter: %s", source_filter)
 
     # Retrieve
     if is_live_query(query):
-        print("Live query — boto3 fallback")
+        logger.info("Live query — boto3 fallback")
         context, source = fallback_response(query, llm)
         confidence = 0.9
         docs = []
     elif source_filter:
         # Targeted metadata filtered search
-        print(f"Targeted search with filter: {source_filter}")
+        logger.info("Targeted search with filter: %s", source_filter)
         docs = vectorstore.similarity_search(
             rewritten_query,
             k=TOP_K,
@@ -250,7 +252,7 @@ def run_pipeline(query, session_id):
         context = format_docs(docs) if docs else ""
     elif is_broad_query(query):
         # Fetch from all sources
-        print("Broad query — fetching from all sources")
+        logger.info("Broad query — fetching from all sources")
         docs = []
         for src in ["aws_s3", "aws_ec2", "aws_lambda",
                     "aws_cloudwatch", "aws_iam", "aws_cost_explorer"]:
@@ -269,7 +271,7 @@ def run_pipeline(query, session_id):
 
     # Fallback if no context
     if not context or confidence < CONFIDENCE_THRESHOLD:
-        print("Low confidence — fallback")
+        logger.info("Low confidence — fallback")
         context, source = fallback_response(query, llm)
         source = source
     else:
@@ -303,10 +305,11 @@ def run_pipeline(query, session_id):
 
 if __name__ == "__main__":
     import uuid
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     session_id = str(uuid.uuid4())
     query = "How many S3 buckets do I have?"
-    print(f"Query: {query}\n")
+    logger.info("Query: %s\n", query)
     result = run_pipeline(query, session_id)
-    print(f"\nAnswer: {result['answer']}")
-    print(f"Confidence: {result['confidence']:.4f}")
-    print(f"Source: {result['source']}")
+    logger.info("\nAnswer: %s", result['answer'])
+    logger.info("Confidence: %.4f", result['confidence'])
+    logger.info("Source: %s", result['source'])

@@ -8,3 +8,6 @@ chroma_db/
 .DS_Store
 *.sqlite
 *.db
+
+*.db-wal
+*.db-shm

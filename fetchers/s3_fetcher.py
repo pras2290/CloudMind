@@ -1,26 +1,33 @@
-import boto3
-import os
+import logging
 from datetime import datetime, timezone
+from botocore.exceptions import ClientError
 from langchain_core.documents import Document
-from dotenv import load_dotenv
+from fetchers.common import AWS_ERRORS, get_boto3_client, record_fetch_failure
 
-load_dotenv()
+logger = logging.getLogger(__name__)
 
-def get_boto3_client(service):
-    return boto3.client(
-        service,
-        aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
-        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"),
-        region_name=os.getenv("AWS_REGION")
-    )
+
+def _list_buckets(client):
+    return client.list_buckets()["Buckets"]
+
 
 def fetch_s3_buckets():
     """Fetch all S3 buckets and their details."""
-    client = get_boto3_client("s3")
-    response = client.list_buckets()
-
     docs = []
-    for bucket in response["Buckets"]:
+    try:
+        client = get_boto3_client("s3")
+        buckets = _list_buckets(client)
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_s3", "buckets", e)
+        return docs
+
+    try:
+        cw = get_boto3_client("cloudwatch")
+    except AWS_ERRORS as e:
+        logger.warning("CloudWatch client unavailable for S3 sizes: %s", e)
+        cw = None
+
+    for bucket in buckets:
         bucket_name = bucket["Name"]
         created = bucket["CreationDate"].strftime("%Y-%m-%d")
 
@@ -28,12 +35,14 @@ def fetch_s3_buckets():
         try:
             location = client.get_bucket_location(Bucket=bucket_name)
             region = location["LocationConstraint"] or "us-east-1"
-        except:
+        except Exception as e:
+            logger.warning("S3 location lookup failed for %s: %s", bucket_name, e)
             region = "unknown"
 
         # Get bucket size and object count
         try:
-            cw = get_boto3_client("cloudwatch")
+            if cw is None:
+                raise RuntimeError("no CloudWatch client")
             size_response = cw.get_metric_statistics(
                 Namespace="AWS/S3",
                 MetricName="BucketSizeBytes",
@@ -48,14 +57,16 @@ def fetch_s3_buckets():
             )
             size = size_response["Datapoints"][0]["Average"] if size_response["Datapoints"] else 0
             size_mb = round(size / (1024 * 1024), 2)
-        except:
+        except Exception as e:
+            logger.warning("S3 size lookup failed for %s: %s", bucket_name, e)
             size_mb = "unknown"
 
         # Get versioning status
         try:
             versioning = client.get_bucket_versioning(Bucket=bucket_name)
             versioning_status = versioning.get("Status", "Disabled")
-        except:
+        except Exception as e:
+            logger.warning("S3 versioning lookup failed for %s: %s", bucket_name, e)
             versioning_status = "unknown"
 
         text = f"""S3 Bucket Details:
@@ -79,47 +90,58 @@ Versioning: {versioning_status}"""
 
 def fetch_s3_bucket_policies():
     """Fetch bucket policies for all buckets."""
-    client = get_boto3_client("s3")
-    response = client.list_buckets()
-
     docs = []
-    for bucket in response["Buckets"]:
+    try:
+        client = get_boto3_client("s3")
+        buckets = _list_buckets(client)
+    except AWS_ERRORS as e:
+        record_fetch_failure("aws_s3", "buckets (policies)", e)
+        return docs
+
+    for bucket in buckets:
         bucket_name = bucket["Name"]
         try:
             policy = client.get_bucket_policy(Bucket=bucket_name)
-            text = f"""S3 Bucket Policy:
+        except ClientError as e:
+            if e.response.get("Error", {}).get("Code") == "NoSuchBucketPolicy":
+                continue  # No policy attached
+            record_fetch_failure("aws_s3", f"policy for {bucket_name}", e)
+            continue
+        except AWS_ERRORS as e:
+            record_fetch_failure("aws_s3", f"policy for {bucket_name}", e)
+            continue
+
+        text = f"""S3 Bucket Policy:
 Bucket: {bucket_name}
 Policy: {policy['Policy']}"""
-            docs.append(Document(
-                page_content=text,
-                metadata={
-                    "source": "aws_s3",
-                    "bucket": bucket_name,
-                    "type": "s3_policy"
-                }
-            ))
-        except:
-            # No policy attached
-            pass
+        docs.append(Document(
+            page_content=text,
+            metadata={
+                "source": "aws_s3",
+                "bucket": bucket_name,
+                "type": "s3_policy"
+            }
+        ))
     return docs
 
 
 def fetch_all_s3_data():
     """Fetch all S3 related data."""
     docs = []
-    print("Fetching S3 buckets...")
+    logger.info("Fetching S3 buckets...")
     docs.extend(fetch_s3_buckets())
-    print("Fetching S3 bucket policies...")
+    logger.info("Fetching S3 bucket policies...")
     docs.extend(fetch_s3_bucket_policies())
-    print(f"S3 fetcher done — {len(docs)} documents")
+    logger.info("S3 fetcher done — %d documents", len(docs))
     return docs
 
 
 # ── Test ──────────────────────────────────────────────────────
 if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     docs = fetch_all_s3_data()
-    print(f"\nTotal docs: {len(docs)}")
-    print("\nSample:")
+    logger.info("\nTotal docs: %d", len(docs))
+    logger.info("\nSample:")
     for doc in docs[:3]:
-        print(f"\n{doc.page_content}")
-        print(f"Metadata: {doc.metadata}")
+        logger.info("\n%s", doc.page_content)
+        logger.info("Metadata: %s", doc.metadata)
